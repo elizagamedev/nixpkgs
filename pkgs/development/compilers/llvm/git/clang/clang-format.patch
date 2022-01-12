@@ -1,0 +1,226 @@
+From 163c13fed9f68c31a14b3d2409b994909f0600bb Mon Sep 17 00:00:00 2001
+From: Peter Stys <peterstys@google.com>
+Date: Fri, 17 Dec 2021 10:26:29 -0800
+Subject: [PATCH] [clang-format] Fix formatting of the code that follows C#
+ Lambda Expressions
+
+The alignment fix introduced by https://reviews.llvm.org/D104388 caused a regression whereby formatting of code that follows the lambda block is incorrect i.e. separate expressions are put on the same line.
+
+Differential Revision: https://reviews.llvm.org/D115738
+---
+ lib/Format/UnwrappedLineParser.cpp    |  38 ++++----
+ lib/Format/UnwrappedLineParser.h      |   1 +
+ unittests/Format/FormatTestCSharp.cpp | 122 ++++++++++++++++++++++++++
+ 3 files changed, 143 insertions(+), 18 deletions(-)
+
+diff --git a/lib/Format/UnwrappedLineParser.cpp b/lib/Format/UnwrappedLineParser.cpp
+index 78405f23e400..0b1771ba7c9c 100644
+--- a/lib/Format/UnwrappedLineParser.cpp
++++ b/lib/Format/UnwrappedLineParser.cpp
+@@ -1941,6 +1941,22 @@ bool UnwrappedLineParser::tryToParseBracedList() {
+   return true;
+ }
+ 
++bool UnwrappedLineParser::tryToParseCSharpLambda() {
++  // Fat arrows (=>) have tok::TokenKind tok::equal but TokenType
++  // TT_FatArrow. They always start an expression or a child block if
++  // followed by a curly brace.
++  nextToken();
++  if (FormatTok->isNot(tok::l_brace))
++    return false;
++  // C# may break after => if the next character is a newline.
++  if (Style.BraceWrapping.AfterFunction) {
++    // calling `addUnwrappedLine()` here causes odd parsing errors.
++    FormatTok->MustBreakBefore = true;
++  }
++  parseChildBlock();
++  return true;
++}
++
+ bool UnwrappedLineParser::parseBracedList(bool ContinueOnSemicolons,
+                                           bool IsEnum,
+                                           tok::TokenKind ClosingBraceKind) {
+@@ -1949,23 +1965,9 @@ bool UnwrappedLineParser::parseBracedList(bool ContinueOnSemicolons,
+   // FIXME: Once we have an expression parser in the UnwrappedLineParser,
+   // replace this by using parseAssignmentExpression() inside.
+   do {
+-    if (Style.isCSharp()) {
+-      // Fat arrows (=>) have tok::TokenKind tok::equal but TokenType
+-      // TT_FatArrow. They always start an expression or a child block if
+-      // followed by a curly brace.
+-      if (FormatTok->is(TT_FatArrow)) {
+-        nextToken();
+-        if (FormatTok->is(tok::l_brace)) {
+-          // C# may break after => if the next character is a newline.
+-          if (Style.isCSharp() && Style.BraceWrapping.AfterFunction == true) {
+-            // calling `addUnwrappedLine()` here causes odd parsing errors.
+-            FormatTok->MustBreakBefore = true;
+-          }
+-          parseChildBlock();
+-          continue;
+-        }
+-      }
+-    }
++    if (Style.isCSharp() && FormatTok->is(TT_FatArrow))
++      if (tryToParseCSharpLambda())
++        continue;
+     if (Style.Language == FormatStyle::LK_JavaScript) {
+       if (FormatTok->is(Keywords.kw_function) ||
+           FormatTok->startsSequence(Keywords.kw_async, Keywords.kw_function)) {
+@@ -2092,7 +2094,7 @@ void UnwrappedLineParser::parseParens() {
+       break;
+     case tok::equal:
+       if (Style.isCSharp() && FormatTok->is(TT_FatArrow))
+-        parseStructuralElement();
++        tryToParseCSharpLambda();
+       else
+         nextToken();
+       break;
+diff --git a/lib/Format/UnwrappedLineParser.h b/lib/Format/UnwrappedLineParser.h
+index b4c082654597..3c07fbf2e8d3 100644
+--- a/lib/Format/UnwrappedLineParser.h
++++ b/lib/Format/UnwrappedLineParser.h
+@@ -138,6 +138,7 @@ private:
+   // https://docs.microsoft.com/en-us/dotnet/csharp/language-reference/keywords/where-generic-type-constraint
+   void parseCSharpGenericTypeConstraint();
+   bool tryToParseLambda();
++  bool tryToParseCSharpLambda();
+   bool tryToParseLambdaIntroducer();
+   bool tryToParsePropertyAccessor();
+   void tryToParseJSFunction();
+diff --git a/unittests/Format/FormatTestCSharp.cpp b/unittests/Format/FormatTestCSharp.cpp
+index 78547e07d215..2cfec61d8f94 100644
+--- a/unittests/Format/FormatTestCSharp.cpp
++++ b/unittests/Format/FormatTestCSharp.cpp
+@@ -759,6 +759,128 @@ class MyClass
+                GoogleStyle);
+ }
+ 
++TEST_F(FormatTestCSharp, CSharpLambdasDontBreakFollowingCodeAlignment) {
++  FormatStyle GoogleStyle = getGoogleStyle(FormatStyle::LK_CSharp);
++  FormatStyle MicrosoftStyle = getMicrosoftStyle(FormatStyle::LK_CSharp);
++
++  verifyFormat(R"(//
++public class Sample
++{
++    public void Test()
++    {
++        while (true)
++        {
++            preBindEnumerators.RemoveAll(enumerator => !enumerator.MoveNext());
++            CodeThatFollowsLambda();
++            IsWellAligned();
++        }
++    }
++})",
++               MicrosoftStyle);
++
++  verifyFormat(R"(//
++public class Sample {
++  public void Test() {
++    while (true) {
++      preBindEnumerators.RemoveAll(enumerator => !enumerator.MoveNext());
++      CodeThatFollowsLambda();
++      IsWellAligned();
++    }
++  }
++})",
++               GoogleStyle);
++}
++
++TEST_F(FormatTestCSharp, CSharpLambdasComplexLambdasDontBreakAlignment) {
++  FormatStyle GoogleStyle = getGoogleStyle(FormatStyle::LK_CSharp);
++  FormatStyle MicrosoftStyle = getMicrosoftStyle(FormatStyle::LK_CSharp);
++
++  verifyFormat(R"(//
++public class Test
++{
++    private static void ComplexLambda(BuildReport protoReport)
++    {
++        allSelectedScenes =
++            veryVeryLongCollectionNameThatPutsTheLineLenghtAboveTheThresholds.Where(scene => scene.enabled)
++                .Select(scene => scene.path)
++                .ToArray();
++        if (allSelectedScenes.Count == 0)
++        {
++            return;
++        }
++        Functions();
++        AreWell();
++        Aligned();
++        AfterLambdaBlock();
++    }
++})",
++               MicrosoftStyle);
++
++  verifyFormat(R"(//
++public class Test {
++  private static void ComplexLambda(BuildReport protoReport) {
++    allSelectedScenes = veryVeryLongCollectionNameThatPutsTheLineLenghtAboveTheThresholds
++                            .Where(scene => scene.enabled)
++                            .Select(scene => scene.path)
++                            .ToArray();
++    if (allSelectedScenes.Count == 0) {
++      return;
++    }
++    Functions();
++    AreWell();
++    Aligned();
++    AfterLambdaBlock();
++  }
++})",
++               GoogleStyle);
++}
++
++TEST_F(FormatTestCSharp, CSharpLambdasMulipleLambdasDontBreakAlignment) {
++  FormatStyle GoogleStyle = getGoogleStyle(FormatStyle::LK_CSharp);
++  FormatStyle MicrosoftStyle = getMicrosoftStyle(FormatStyle::LK_CSharp);
++
++  verifyFormat(R"(//
++public class Test
++{
++    private static void MultipleLambdas(BuildReport protoReport)
++    {
++        allSelectedScenes =
++            veryVeryLongCollectionNameThatPutsTheLineLenghtAboveTheThresholds.Where(scene => scene.enabled)
++                .Select(scene => scene.path)
++                .ToArray();
++        preBindEnumerators.RemoveAll(enumerator => !enumerator.MoveNext());
++        if (allSelectedScenes.Count == 0)
++        {
++            return;
++        }
++        Functions();
++        AreWell();
++        Aligned();
++        AfterLambdaBlock();
++    }
++})",
++               MicrosoftStyle);
++
++  verifyFormat(R"(//
++public class Test {
++  private static void MultipleLambdas(BuildReport protoReport) {
++    allSelectedScenes = veryVeryLongCollectionNameThatPutsTheLineLenghtAboveTheThresholds
++                            .Where(scene => scene.enabled)
++                            .Select(scene => scene.path)
++                            .ToArray();
++    preBindEnumerators.RemoveAll(enumerator => !enumerator.MoveNext());
++    if (allSelectedScenes.Count == 0) {
++      return;
++    }
++    Functions();
++    AreWell();
++    Aligned();
++    AfterLambdaBlock();
++  }
++})",
++               GoogleStyle);
++}
++
+ TEST_F(FormatTestCSharp, CSharpObjectInitializers) {
+   FormatStyle Style = getGoogleStyle(FormatStyle::LK_CSharp);
+ 
+-- 
+2.33.1
+

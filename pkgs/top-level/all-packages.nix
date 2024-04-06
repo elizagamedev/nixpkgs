@@ -35683,6 +35683,8 @@ with pkgs;
 
   whisper-ctranslate2 = callPackage ../tools/audio/whisper-ctranslate2 { };
 
+  whisperx = with python3.pkgs; toPythonApplication whisperx;
+
   waon = callPackage ../applications/audio/waon { };
 
   warp = callPackage ../applications/networking/warp {
